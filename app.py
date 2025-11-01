@@ -102,6 +102,7 @@ def process_video(video_path, zones, lines, output_path):
 
     # Tracking data
     zone_ids = {zone['name']: set() for zone in zones}
+    track_history = {}  # Store centroid history for trails
 
     frame_count = 0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -144,6 +145,41 @@ def process_video(video_path, zones, lines, output_path):
                 # Draw boxes and labels using Supervision
                 frame = box_annotator.annotate(scene=frame, detections=detections)
                 frame = label_annotator.annotate(scene=frame, detections=detections, labels=labels)
+
+                # Draw centroids and tracking trails
+                for i in range(len(detections)):
+                    # Get bounding box
+                    x1, y1, x2, y2 = detections.xyxy[i].astype(int)
+
+                    # Calculate centroid
+                    centroid_x = (x1 + x2) // 2
+                    centroid_y = (y1 + y2) // 2
+                    centroid = (centroid_x, centroid_y)
+
+                    # Draw centroid as a circle
+                    cv2.circle(frame, centroid, 6, (255, 0, 255), -1)  # Magenta circle
+                    cv2.circle(frame, centroid, 8, (255, 255, 255), 2)  # White border
+
+                    # Draw tracking trail if tracker_id exists
+                    if detections.tracker_id is not None:
+                        tracker_id = int(detections.tracker_id[i])
+
+                        # Update history
+                        if tracker_id not in track_history:
+                            track_history[tracker_id] = []
+                        track_history[tracker_id].append(centroid)
+
+                        # Keep only last 30 points for trail
+                        if len(track_history[tracker_id]) > 30:
+                            track_history[tracker_id] = track_history[tracker_id][-30:]
+
+                        # Draw trail
+                        points = track_history[tracker_id]
+                        if len(points) > 1:
+                            for j in range(1, len(points)):
+                                # Calculate thickness based on age (newer = thicker)
+                                thickness = max(1, int(3 * (j / len(points))))
+                                cv2.line(frame, points[j-1], points[j], (255, 0, 255), thickness)
 
                 # Process zones with Supervision
                 for zone_name, sv_zone in sv_zones.items():
@@ -206,13 +242,84 @@ def process_video(video_path, zones, lines, output_path):
             cv2.putText(frame, label, (label_pos[0], label_pos[1] - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-        # Draw line zones using Supervision
-        for line_name, line_annotator in line_annotators.items():
-            # Draw line with counts
+        # Draw line zones using Supervision with enhanced IN/OUT labels
+        for idx, (line_name, line_annotator) in enumerate(line_annotators.items()):
+            # Draw line with counts using Supervision
             frame = line_annotator.annotate(
                 frame=frame,
                 line_counter=sv_line_zones[line_name]
             )
+
+            # Get line details for custom IN/OUT labels
+            line = lines[idx]
+            start_x = int(line['start']['x'] * width)
+            start_y = int(line['start']['y'] * height)
+            end_x = int(line['end']['x'] * width)
+            end_y = int(line['end']['y'] * height)
+
+            # Calculate midpoint and perpendicular direction
+            mid_x = (start_x + end_x) // 2
+            mid_y = (start_y + end_y) // 2
+
+            # Get current counts from Supervision LineZone
+            in_count = sv_line_zones[line_name].in_count
+            out_count = sv_line_zones[line_name].out_count
+
+            # Draw IN label above the line
+            in_label = f"IN: {in_count}"
+            (in_w, in_h), _ = cv2.getTextSize(in_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            # Background for IN label
+            cv2.rectangle(frame, (mid_x - 20, mid_y - 60), (mid_x + in_w + 20, mid_y - 25), (0, 0, 0), -1)
+            cv2.rectangle(frame, (mid_x - 20, mid_y - 60), (mid_x + in_w + 20, mid_y - 25), (0, 255, 0), 2)
+            cv2.putText(frame, in_label, (mid_x, mid_y - 35),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            # Draw OUT label below the line
+            out_label = f"OUT: {out_count}"
+            (out_w, out_h), _ = cv2.getTextSize(out_label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            # Background for OUT label
+            cv2.rectangle(frame, (mid_x - 20, mid_y + 25), (mid_x + out_w + 20, mid_y + 60), (0, 0, 0), -1)
+            cv2.rectangle(frame, (mid_x - 20, mid_y + 25), (mid_x + out_w + 20, mid_y + 60), (0, 0, 255), 2)
+            cv2.putText(frame, out_label, (mid_x, mid_y + 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+            # Draw arrow indicators for direction
+            # Arrow pointing up for IN
+            arrow_up = np.array([[mid_x - 60, mid_y - 40], [mid_x - 70, mid_y - 50], [mid_x - 50, mid_y - 50]], np.int32)
+            cv2.fillPoly(frame, [arrow_up], (0, 255, 0))
+
+            # Arrow pointing down for OUT
+            arrow_down = np.array([[mid_x - 60, mid_y + 40], [mid_x - 70, mid_y + 30], [mid_x - 50, mid_y + 30]], np.int32)
+            cv2.fillPoly(frame, [arrow_down], (0, 0, 255))
+
+        # Draw summary panel at top-right corner
+        if lines:  # Only if we have counting lines
+            panel_height = 100
+            panel_width = 250
+            panel_x = width - panel_width - 10
+            panel_y = 10
+
+            # Semi-transparent background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (panel_x, panel_y), (width - 10, panel_y + panel_height), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+
+            # Border
+            cv2.rectangle(frame, (panel_x, panel_y), (width - 10, panel_y + panel_height), (255, 255, 255), 2)
+
+            # Title
+            cv2.putText(frame, "TOTAL COUNTS", (panel_x + 10, panel_y + 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+            # Calculate total IN and OUT
+            total_in = sum(sv_line_zones[line_name].in_count for line_name in sv_line_zones)
+            total_out = sum(sv_line_zones[line_name].out_count for line_name in sv_line_zones)
+
+            # Display totals
+            cv2.putText(frame, f"IN:  {total_in}", (panel_x + 20, panel_y + 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.putText(frame, f"OUT: {total_out}", (panel_x + 20, panel_y + 90),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         # Write frame
         out.write(frame)
